@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+build = ["pyinstaller>=6.10", "pillow>=10"]
 
 [project.gui-scripts]
 esheep = "esheep.app:main"

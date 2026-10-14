@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 from pathlib import Path
@@ -197,7 +198,19 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def ensure_standard_streams() -> None:
+    """Windowed builds (e.g. the Windows .exe) start with no console streams.
+
+    ``print`` and argparse would crash on ``None``, so send output nowhere instead.
+    """
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+
+
 def main(argv: list[str] | None = None) -> int:
+    ensure_standard_streams()
     arguments = parse_arguments(sys.argv[1:] if argv is None else argv)
 
     platform_support.prepare_environment()
@@ -209,7 +222,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         definition = load_pet_definition(pet_path)
     except Exception as error:
-        print(f"esheep: could not load pet file {pet_path}: {error}", file=sys.stderr)
+        # Packaged apps have no visible terminal, so also show a dialog.
+        message = f"Could not load pet file:\n{pet_path}\n\n{error}"
+        print(f"esheep: {message}", file=sys.stderr)
+        QMessageBox.critical(None, "eSheep", message)
         return 1
 
     manager = PetManager(app, definition, pet_path)
