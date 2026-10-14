@@ -26,7 +26,7 @@ class PetManager:
 
     def __init__(self, app: QApplication, definition: PetDefinition, pet_path: Path):
         self.app = app
-        self.window_tracker = WindowTracker()
+        self.window_tracker = WindowTracker(pet_surface_provider=self._pet_surfaces)
         self.pets: list[PetWindow] = []
         self.is_quitting = False
 
@@ -76,6 +76,10 @@ class PetManager:
 
     def _main_pets(self) -> list[PetWindow]:
         return [pet for pet in self.pets if not pet.is_child]
+
+    def _pet_surfaces(self):
+        """Pets other pets can land on. Children (e.g. a UFO) are not solid."""
+        return [pet.as_surface() for pet in self._main_pets() if pet.isVisible()]
 
     def remove_pet(self, pet: PetWindow) -> None:
         pet.kill()

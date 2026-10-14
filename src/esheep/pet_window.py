@@ -8,6 +8,7 @@ or the end of the sequence triggers the next animation.
 
 from __future__ import annotations
 
+import itertools
 import math
 import random
 import time
@@ -27,8 +28,10 @@ if TYPE_CHECKING:
     from .app import PetManager
 
 MAX_CHILD_DEPTH = 5             # children may create children, up to this depth
+_surface_serials = itertools.count(1)
 GRAVITY_SNAP_PIXELS = 3         # pets this close to the ground don't fall
 TOSS_TICK_MS = 16
+FOLLOW_TICK_MS = 16             # how often a standing pet re-checks what it stands on
 TOSS_FRAME_INTERVAL_MS = 30
 TOSS_MINIMUM_FORCE = 5
 HARD_LANDING_VELOCITY = 40
@@ -74,8 +77,11 @@ class PetWindow(QWidget):
         self.next_interval = 1000
         self.respawned_during_step = False
 
-        # The window the pet is standing on (None = taskbar / free fall).
+        # The window (or other pet) this pet is standing on (None = taskbar / free fall).
         self.surface_window: DesktopWindow | None = None
+        # Identifies this pet as a surface for others. It changes on every
+        # spawn, so pets riding on it fall off instead of teleporting along.
+        self.surface_serial = next(_surface_serials)
 
         # Mouse interaction.
         self.is_dragging = False
@@ -100,6 +106,12 @@ class PetWindow(QWidget):
         self.toss_timer.setInterval(TOSS_TICK_MS)
         self.toss_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.toss_timer.timeout.connect(self._on_toss_timer)
+
+        # Keeps the pet on a moving window/pet between animation steps, since
+        # many animations (sleeping, turning...) don't run the gravity check.
+        self.follow_timer = QTimer(self)
+        self.follow_timer.setInterval(FOLLOW_TICK_MS)
+        self.follow_timer.timeout.connect(self._on_follow_timer)
 
     # ------------------------------------------------------------------
     # Screen geometry helpers
@@ -162,6 +174,7 @@ class PetWindow(QWidget):
         self.respawned_during_step = True
         self.animation_step = 0
         self.surface_window = None
+        self.surface_serial = next(_surface_serials)
         self.random_spawn = self.rng.randint(10, 89)
 
         spawn = self.definition.pick_spawn(self.rng)
@@ -213,6 +226,16 @@ class PetWindow(QWidget):
     @property
     def is_child(self) -> bool:
         return self.child_depth > 0
+
+    def as_surface(self) -> DesktopWindow:
+        """This pet's on-screen rectangle, so that other pets can stand on it."""
+        return DesktopWindow(
+            window_id=-self.surface_serial,
+            left=self.x(),
+            top=self.y(),
+            right=self.x() + self.width_px,
+            bottom=self.y() + self.height_px,
+        )
 
     # ------------------------------------------------------------------
     # Switching animations
@@ -280,6 +303,7 @@ class PetWindow(QWidget):
         if not self.respawned_during_step:
             self.animation_step += 1
         self.step_timer.start(max(1, int(self.next_interval)))
+        self._update_follow_timer()
 
     def next_step(self) -> None:
         """Advance the current animation by one step (port of ``NextStep``)."""
@@ -513,15 +537,38 @@ class PetWindow(QWidget):
         self.position_y += window.top - previous.top
         self.surface_window = window
 
+    def _update_follow_timer(self) -> None:
+        """Run the follow timer only while the pet is standing on something."""
+        should_follow = (self.surface_window is not None
+                         and not self.is_dragging and not self.is_tossing)
+        if should_follow and not self.follow_timer.isActive():
+            self.follow_timer.start()
+        elif not should_follow and self.follow_timer.isActive():
+            self.follow_timer.stop()
+
+    def _on_follow_timer(self) -> None:
+        """Move with the window/pet underneath as soon as it moves."""
+        if self.surface_window is None or self.is_dragging or self.is_tossing:
+            self.follow_timer.stop()
+            return
+        # Falling off a vanished surface is left to the gravity check, as upstream.
+        window = self.window_tracker.find(self.surface_window.window_id)
+        if window is not None and self._window_moved(window):
+            self._follow_window(window)
+            self._apply_position()
+
     def _detect_window_below(self, dy: float) -> float | None:
-        """If the pet will cross the top edge of a visible window, return that edge."""
+        """If the pet will cross the top edge of a window or another pet, return that edge."""
         if dy <= 0:
             return None
         area = self._screen_area()
         pet_bottom = self.position_y + self.height_px
         half_width = self.width_px / 2
 
-        for window in self.window_tracker.windows():
+        # Other pets first: they are always drawn in front of every window.
+        own_id = -self.surface_serial
+        other_pets = [pet for pet in self.window_tracker.pet_surfaces() if pet.window_id != own_id]
+        for window in other_pets + self.window_tracker.windows():
             crosses_top_edge = pet_bottom < window.top <= pet_bottom + dy
             above_window = (window.left - half_width <= self.position_x
                             and self.position_x + self.width_px <= window.right + half_width)
@@ -567,6 +614,7 @@ class PetWindow(QWidget):
         self.is_dragging = True
         self.is_tossing = False
         self.toss_timer.stop()
+        self.follow_timer.stop()
         self.raise_()
 
         global_position = event.globalPosition()
@@ -717,6 +765,7 @@ class PetWindow(QWidget):
     def closeEvent(self, event) -> None:
         self.step_timer.stop()
         self.toss_timer.stop()
+        self.follow_timer.stop()
         for child in list(self.children_pets):
             child.close()
         super().closeEvent(event)

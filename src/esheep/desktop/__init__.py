@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -36,15 +37,32 @@ class WindowBackend:
         return []
 
 
+def is_pet_surface(window_id: int) -> bool:
+    """Pets use negative ids so they can never clash with real window ids."""
+    return window_id < 0
+
+
 class WindowTracker:
-    """Caches the window list briefly, since many pets query it every tick."""
+    """Everything a pet can stand on: other apps' windows and other pets.
+
+    The OS window list is cached briefly, since many pets query it every tick.
+    Pet surfaces come straight from the app (they move every tick anyway).
+    """
 
     CACHE_SECONDS = 0.1
 
-    def __init__(self, backend: WindowBackend | None = None):
+    def __init__(self, backend: WindowBackend | None = None,
+                 pet_surface_provider: Callable[[], list[DesktopWindow]] | None = None):
         self._backend = backend if backend is not None else create_backend()
         self._cached_windows: list[DesktopWindow] = []
         self._cached_at = 0.0
+        self.pet_surface_provider = pet_surface_provider
+
+    def pet_surfaces(self) -> list[DesktopWindow]:
+        """Other pets, which (as in the original eSheep) can be stood on too."""
+        if self.pet_surface_provider is None:
+            return []
+        return self.pet_surface_provider()
 
     def windows(self) -> list[DesktopWindow]:
         now = time.monotonic()
@@ -58,13 +76,17 @@ class WindowTracker:
         return self._cached_windows
 
     def find(self, window_id: int) -> DesktopWindow | None:
-        for window in self.windows():
+        """Current rectangle of a window or pet, or None if it's gone."""
+        candidates = self.pet_surfaces() if is_pet_surface(window_id) else self.windows()
+        for window in candidates:
             if window.window_id == window_id:
                 return window
         return None
 
     def is_top_edge_covered(self, target: DesktopWindow, x_left: float, x_right: float) -> bool:
         """True if a window in front of ``target`` hides its top edge at [x_left, x_right]."""
+        if is_pet_surface(target.window_id):
+            return False   # pets are always on top of every window
         for window in self.windows():
             if window.window_id == target.window_id:
                 return False   # reached the target: nothing in front covers it
