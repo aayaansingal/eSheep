@@ -8,7 +8,7 @@ import signal
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QTimer
 from PySide6.QtGui import QAction, QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon
 
@@ -72,7 +72,7 @@ class PetManager:
                 other.children_pets.remove(pet)
         pet.deleteLater()
         if self.is_quitting and not self._main_pets():
-            self.app.quit()
+            self.exit_application()
 
     def _main_pets(self) -> list[PetWindow]:
         return [pet for pet in self.pets if not pet.is_child]
@@ -91,11 +91,30 @@ class PetManager:
         self.is_quitting = True
         self.tray_icon.hide()
         if not self._main_pets():
-            self.app.quit()
+            self.exit_application()
             return
         for pet in list(self._main_pets()):
             pet.kill()
-        QTimer.singleShot(QUIT_GRACE_PERIOD_MS, self.app.quit)
+        QTimer.singleShot(QUIT_GRACE_PERIOD_MS, self.exit_application)
+
+    def exit_application(self) -> None:
+        """Stop the event loop so ``main`` can shut down cleanly.
+
+        Deliberately not ``QApplication.quit()``: on macOS, Qt 6 routes that
+        through ``NSApplication terminate:``, which calls ``exit()`` straight
+        away when invoked from a menu's nested event loop. Qt then destroys
+        windows during process teardown and crashes. ``exit(0)`` just ends
+        every running event loop and lets ``app.exec()`` return normally.
+        """
+        self.app.exit(0)
+
+    def shutdown(self) -> None:
+        """Close and delete every pet while Qt is still fully alive."""
+        self.tray_icon.hide()
+        for pet in list(self.pets):
+            pet.close()
+        # Run the pending deleteLater() calls now, not during process exit.
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def load_pet(self, path: Path) -> None:
         """Replace the current pet type with another XML file, keeping the pet count."""
@@ -242,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
     interrupt_poller.start(250)       # wakes Python so it can notice the signal
     interrupt_poller.timeout.connect(lambda: None)
 
-    return app.exec()
+    exit_code = app.exec()
+    manager.shutdown()
+    return exit_code
 
 
 if __name__ == "__main__":
